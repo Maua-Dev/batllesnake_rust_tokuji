@@ -8,9 +8,10 @@
 // ESTE É O ARQUIVO QUE VOCÊ VAI EDITAR. Todo o resto do projeto existe
 // só para levar o estado do jogo até as quatro funções abaixo.
 //
-// Estratégia (pensada para partidas com 4+ cobras): descarta o que mata na
-// hora, evita becos (flood fill) e head-to-head com cobras maiores, e só busca
-// comida quando está com fome ou não é a maior da mesa.
+// Estratégia (pensada para partidas 1v1): descarta o que mata na hora, evita
+// becos (flood fill) e head-to-head quando não somos estritamente maiores, e
+// disputa território (Voronoi) com o adversário. Só busca comida quando está
+// com fome ou não é maior que ele (precisa ser maior para ganhar o head-to-head).
 // Documentação: https://docs.battlesnake.com
 
 use crate::models::{Battlesnake, Coord, GameState};
@@ -27,7 +28,7 @@ pub fn info() -> Value {
     json!({
         "apiversion": "1",
         "author": "Tokuji",
-        "color": "#0077B6", // ciano escuro / azul petróleo
+        "color": "#5c00cd", // ciano escuro / azul petróleo
         "head": "sand-worm",
         "tail": "round-bum",
         "version": "1.0.0"
@@ -54,9 +55,9 @@ const MOVES: [(&str, i32, i32); 4] = [
 
 // Pesos da pontuação. Ordem de gravidade: beco > head-to-head > o resto.
 const TRAP: i32 = -1000; // espaço alcançável menor que o nosso corpo
-const H2H_BIGGER: i32 = -500; // casa que um adversário maior alcança junto com a gente
-const H2H_EQUAL: i32 = -300; // empate de tamanho: morrem os dois
-const H2H_SMALLER: i32 = 10; // adversário menor: o head-to-head é nosso
+const H2H_BIGGER: i32 = -500; // casa que o adversário maior alcança junto com a gente
+const H2H_EQUAL: i32 = -300; // empate de tamanho: morrem os dois (no 1v1 isso é empate, não vitória)
+const H2H_SMALLER: i32 = 30; // adversário menor: o head-to-head vence a partida
 const HAZARD: i32 = -20;
 const HUNGER_MARGIN: i32 = 15; // vida que queremos sobrando ao chegar na comida
 
@@ -131,6 +132,24 @@ impl Grid {
             }
         }
     }
+
+    /// Distância de `start` até cada casa livre (`i32::MAX` se inalcançável).
+    fn dists(&self, start: Coord) -> Vec<i32> {
+        let mut dist = vec![i32::MAX; self.blocked.len()];
+        self.bfs(start, |c, d| {
+            dist[self.idx(c)] = d;
+            false
+        });
+        dist
+    }
+}
+
+/// Voronoi: casas que chegamos primeiro menos casas que o adversário chega primeiro.
+fn territory(mine: &[i32], theirs: &[i32]) -> i32 {
+    mine.iter()
+        .zip(theirs)
+        .map(|(a, b)| (a < b) as i32 - (b < a) as i32)
+        .sum()
 }
 
 fn distance(a: Coord, b: Coord) -> i32 {
@@ -146,13 +165,10 @@ pub fn get_move(state: &GameState) -> Value {
     let me = &state.you;
     let head = me.body[0];
     let grid = Grid::new(state);
-    let opponents: Vec<&Battlesnake> = state
-        .board
-        .snakes
-        .iter()
-        .filter(|s| s.id != me.id)
-        .collect();
-    let biggest_opponent = opponents.iter().map(|s| s.length).max().unwrap_or(0);
+    // 1v1: no máximo um adversário (None se ele já morreu ou em teste solo).
+    let opponent: Option<&Battlesnake> = state.board.snakes.iter().find(|s| s.id != me.id);
+    let opp_len = opponent.map_or(0, |o| o.length);
+    let opp_dists = opponent.map(|o| grid.dists(o.head));
     let hazard_damage = state
         .game
         .ruleset
@@ -178,14 +194,12 @@ pub fn get_move(state: &GameState) -> Value {
 
         let mut score = 0;
 
-        for o in &opponents {
-            if distance(o.head, target) == 1 {
-                score += match o.length.cmp(&me.length) {
-                    std::cmp::Ordering::Greater => H2H_BIGGER,
-                    std::cmp::Ordering::Equal => H2H_EQUAL,
-                    std::cmp::Ordering::Less => H2H_SMALLER,
-                };
-            }
+        if let Some(o) = opponent.filter(|o| distance(o.head, target) == 1) {
+            score += match o.length.cmp(&me.length) {
+                std::cmp::Ordering::Greater => H2H_BIGGER,
+                std::cmp::Ordering::Equal => H2H_EQUAL,
+                std::cmp::Ordering::Less => H2H_SMALLER,
+            };
         }
 
         let mut space = 0;
@@ -196,20 +210,21 @@ pub fn get_move(state: &GameState) -> Value {
         if space < me.length {
             score += TRAP;
         }
-        // Espaço acima de 2x o corpo não faz diferença: aí quem decide é a comida.
-        score += space.min(2 * me.length);
+        // Território: sem adversário vivo, vale o espaço alcançável (até 2x o corpo).
+        score += match &opp_dists {
+            Some(theirs) => territory(&grid.dists(target), theirs),
+            None => space.min(2 * me.length),
+        };
 
         if in_hazard {
             score += HAZARD;
         }
 
-        // Comida mais próxima que nenhum adversário maior/igual alcança antes.
+        // Comida mais próxima que o adversário (maior/igual) não alcança antes.
         let mut food_dist = None;
         grid.bfs(target, |c, d| {
             let found = state.board.food.contains(&c)
-                && !opponents
-                    .iter()
-                    .any(|o| o.length >= me.length && distance(o.head, c) <= d + 1);
+                && !opponent.is_some_and(|o| o.length >= me.length && distance(o.head, c) <= d + 1);
             if found {
                 food_dist = Some(d);
             }
@@ -218,8 +233,8 @@ pub fn get_move(state: &GameState) -> Value {
         if let Some(d) = food_dist {
             if me.health - 1 - d < HUNGER_MARGIN {
                 score += (200 - 5 * d).max(0); // fome: comida vira prioridade
-            } else if me.length <= biggest_opponent {
-                score += (40 - 2 * d).max(0); // crescer para ganhar os head-to-heads
+            } else if me.length <= opp_len {
+                score += (40 - 2 * d).max(0); // crescer para passar o adversário e ganhar os head-to-heads
             }
         }
 
@@ -277,6 +292,14 @@ mod tests {
             vec![c(7, 5), c(8, 5), c(9, 5), c(10, 5), c(10, 4)],
         );
         assert_ne!(chosen_move(&arena(me, vec![big])), "right");
+    }
+
+    #[test]
+    fn disputa_o_centro_no_1v1() {
+        // Cobras do mesmo tamanho frente a frente: avançar rouba território.
+        let me = snake("eu", vec![c(3, 5), c(2, 5), c(1, 5)]);
+        let foe = snake("ele", vec![c(8, 5), c(9, 5), c(10, 5)]);
+        assert_eq!(chosen_move(&arena(me, vec![foe])), "right");
     }
 
     #[test]

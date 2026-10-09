@@ -128,7 +128,9 @@ mod tests {
     fn request(method: &str, path: &str, body: &str) -> Request {
         http::Request::builder()
             .method(method)
-            .uri(format!("https://abc123.execute-api.us-east-1.amazonaws.com{path}"))
+            .uri(format!(
+                "https://abc123.execute-api.us-east-1.amazonaws.com{path}"
+            ))
             .header("Content-Type", "application/json")
             .body(Body::from(body.to_owned()))
             .unwrap()
@@ -168,7 +170,9 @@ mod tests {
 
     #[tokio::test]
     async fn move_devolve_uma_direcao_valida() {
-        let response = handler(request("POST", "/dev/move", GAME_STATE)).await.unwrap();
+        let response = handler(request("POST", "/dev/move", GAME_STATE))
+            .await
+            .unwrap();
         let body = std::str::from_utf8(response.body().as_ref()).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
 
