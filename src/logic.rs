@@ -59,7 +59,10 @@ const H2H_BIGGER: i32 = -500; // casa que o adversário maior alcança junto com
 const H2H_EQUAL: i32 = -300; // empate de tamanho: morrem os dois (no 1v1 isso é empate, não vitória)
 const H2H_SMALLER: i32 = 30; // adversário menor: o head-to-head vence a partida
 const HAZARD: i32 = -20;
-const HUNGER_MARGIN: i32 = 15; // vida que queremos sobrando ao chegar na comida
+const HUNGER_MARGIN: i32 = 10; // vida que queremos sobrando ao chegar na comida
+const MAX_GROW: i32 = 12; // acima disso não crescemos por estratégia: corpo grande vira obstáculo
+const EAT_PENALTY: i32 = -40; // comer sem precisar só atrapalha a agilidade
+const SAFE_HEALTH: i32 = 40; // acima disso comer só se for para crescer de propósito
 
 /// Casas ocupadas do tabuleiro neste turno.
 struct Grid {
@@ -216,6 +219,11 @@ pub fn get_move(state: &GameState) -> Value {
             None => space.min(2 * me.length),
         };
 
+        let wants_growth = me.length <= opp_len && me.length < MAX_GROW;
+        if eats && !wants_growth && me.health > SAFE_HEALTH {
+            score += EAT_PENALTY;
+        }
+
         if in_hazard {
             score += HAZARD;
         }
@@ -233,7 +241,7 @@ pub fn get_move(state: &GameState) -> Value {
         if let Some(d) = food_dist {
             if me.health - 1 - d < HUNGER_MARGIN {
                 score += (200 - 5 * d).max(0); // fome: comida vira prioridade
-            } else if me.length <= opp_len {
+            } else if wants_growth {
                 score += (40 - 2 * d).max(0); // crescer para passar o adversário e ganhar os head-to-heads
             }
         }
@@ -300,6 +308,16 @@ mod tests {
         let me = snake("eu", vec![c(3, 5), c(2, 5), c(1, 5)]);
         let foe = snake("ele", vec![c(8, 5), c(9, 5), c(10, 5)]);
         assert_eq!(chosen_move(&arena(me, vec![foe])), "right");
+    }
+
+    #[test]
+    fn nao_come_sem_precisar() {
+        // Maior que o adversário e com vida cheia: a comida ao lado é ignorada.
+        let me = snake("eu", vec![c(5, 5), c(4, 5), c(3, 5), c(2, 5)]);
+        let foe = snake("ele", vec![c(9, 9), c(9, 10)]);
+        let mut state = arena(me, vec![foe]);
+        state.board.food = vec![c(6, 5)];
+        assert_ne!(chosen_move(&state), "right");
     }
 
     #[test]
